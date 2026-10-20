@@ -27,8 +27,14 @@ __pycache__/
 venv/
 data/
 shots/
+!extension/shots/
 *.log
 
 # ---- generated pages contain audio, so they never go in ----
 song-*.html
 page.html
+
+# ---- extension assets are fetched, not committed ----
+extension/models/
+extension/vendor/
+extension/test/results/
