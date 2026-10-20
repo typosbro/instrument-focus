@@ -1,0 +1,34 @@
+# ---- never publish audio ----
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.mp4
+*.webm
+stems/
+stems6/
+songs/
+audio/
+
+# ---- models are fetched, not committed ----
+*.onnx
+*.onnx.data
+*.sf2
+models/
+vendor/
+vendor131/
+
+# ---- build and runtime junk ----
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/
+shots/
+*.log
+
+# ---- generated pages contain audio, so they never go in ----
+song-*.html
+page.html
