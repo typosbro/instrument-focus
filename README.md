@@ -20,7 +20,18 @@ Working, and honest about what is not done.
 | Adaptive mixer page, one self-contained HTML per song | working |
 | Batch pipeline: link in, page out | working |
 | Browser-side separation on WebGPU | measured, RTF 0.191 |
-| Browser extension | in progress |
+| Browser extension, Chrome MV3, separation on your own GPU | working, measured |
+
+## Try it
+
+    git clone https://github.com/typosbro/instrument-focus
+    cd instrument-focus
+    ./scripts/fetch_assets.sh          # 325 MB of model and runtime, once
+
+Then in Chrome: chrome://extensions, turn on Developer mode, Load unpacked, pick the extension
+folder. Open any YouTube video and click the pill in the bottom right.
+
+You need WebGPU. An 8 GB integrated-graphics laptop will struggle: see the limits below.
 
 ## How it works
 
@@ -48,6 +59,22 @@ Server-side batch pipeline, CPU only, for a 271-second song:
 
     resolve 2.6 s | download 3.9 s | separate 77.7 s | measure 0.9 s | render 38.5 s
     total 141.7 s, page 26 MB, all six stems present
+
+## The extension
+
+On a YouTube watch page it takes the audio, separates it into six stems on your own GPU, caches the
+result by video id, and then plays the stems in sync with the video. No server is involved and no
+audio leaves the machine.
+
+Measured on a 3:32 song:
+
+    click to ready   64.2 s   (37 windows of 7.8 s, 1.397 s per window, compute RTF 0.179)
+    cached replay     0.29 s
+    memory           ~6.45 GB summed Chrome RSS
+    sync             settled drift 0 ms, transient max 57 ms
+    cache            224 MB, about 1.06 MB per second of music
+
+It survives seek, pause, rate change, tab switch and ad breaks without drifting.
 
 ## What actually limits this
 
