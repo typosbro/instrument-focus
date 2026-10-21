@@ -1,0 +1,14 @@
+# GitGuardian configuration.
+#
+# The one match that gets flagged in this repo is YouTube's public web-client key, not a
+# credential belonging to anyone. It is embedded in YouTube's own served JavaScript and is
+# visible as a request parameter in any browser cache of youtube.com:
+#
+#   https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8
+#
+# It grants no private access and is not rotatable by a third party. Ignored deliberately.
+version: 2
+secret:
+  ignored-matches:
+    - name: YouTube public web-client key (not a secret)
+      match: AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8
