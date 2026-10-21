@@ -22,6 +22,10 @@
   var EMPH_FEATURED = 9;
   var EMPH_OTHERS = -6;
   var PEAK_CEIL = 0.891;         // -1 dBFS
+  // PUBLIC CONSTANT, NOT A SECRET: YouTube web client key, shipped in every
+  // youtube.com page as /youtubei/v1/player?key=... It grants no private access.
+  var INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+  var VISIONOS_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
   var hostEl = null, hostReady = false, hostQueue = [];
   var mounted = false, mountedFor = null;
@@ -116,6 +120,7 @@
     onHost(m);
   });
   function onHost(m) {
+    if (m.type === "need-audio") { provideAudioSource(m.videoId, m.reqId); return; }
     if (m.type === "host-ready") {
       hostReady = true;
       for (var i = 0; i < hostQueue.length; i++) hostSend(hostQueue[i]);
@@ -792,6 +797,163 @@
     if (v && v.paused && !v.ended) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
   }
 
+  /* --------------------------------------------------- page-origin audio lookup
+   * Firefox: the host frame's POST /youtubei/v1/player leaves with
+   * Origin: moz-extension://<uuid> and Google answers 403 "automated queries".
+   * The same POST from this content script runs on the youtube.com page origin
+   * and returns 200, so the host asks for the formats on a cache miss. The host
+   * still downloads the audio; only the lookup moved here. The page's own
+   * ytInitialPlayerResponse is tried first (no network at all), but current
+   * WEB responses are SABR-only, so the POST is the usual path.
+   */
+  function pageWindow() {
+    try { return window.wrappedJSObject || window; } catch (e) { return window; }
+  }
+
+  function pagePlayerResponse() {
+    var out = [];
+    try {
+      var w = pageWindow();
+      if (w.ytInitialPlayerResponse) out.push(w.ytInitialPlayerResponse);
+      var cfg = w.ytplayer && w.ytplayer.config && w.ytplayer.config.args;
+      if (cfg && cfg.player_response) out.push(JSON.parse(cfg.player_response));
+    } catch (e) { log("page player response unavailable", e); }
+    return out;
+  }
+
+  function pageVisitorData() {
+    try {
+      var w = pageWindow();
+      var v = w.ytcfg && w.ytcfg.data_ && w.ytcfg.data_.VISITOR_DATA;
+      if (typeof v === "string" && v) return v;
+    } catch (e) {}
+    try {
+      var html = document.documentElement.innerHTML || "";
+      var m = html.match(/"VISITOR_DATA":"([^"]+)"/) || html.match(/"visitorData":"([^"]+)"/);
+      if (m) return m[1];
+    } catch (e) {}
+    return null;
+  }
+
+  function audioOnlyFormats(pr, videoId) {
+    var out = [];
+    if (!pr || !pr.streamingData) return out;
+    try {
+      var vd = pr.videoDetails || {};
+      if (vd.videoId && vd.videoId !== videoId) return out;
+      var af = pr.streamingData.adaptiveFormats || [];
+      for (var i = 0; i < af.length; i++) {
+        var f = af[i];
+        if (!f || !/^audio\//.test(String(f.mimeType || "")) || !f.url) continue;
+        out.push({
+          itag: f.itag, url: String(f.url), mimeType: f.mimeType,
+          contentLength: f.contentLength, bitrate: f.bitrate, audioQuality: f.audioQuality,
+        });
+      }
+    } catch (e) { log("could not read adaptive formats", e); }
+    return out;
+  }
+
+  async function freshVisitorData(videoId) {
+    var res = await fetch("https://www.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&hl=en&gl=US", {
+      credentials: "omit", cache: "no-store",
+    });
+    if (!res.ok) throw new Error("watch page HTTP " + res.status);
+    var html = await res.text();
+    var m = html.match(/"visitorData":"(.*?)"/);
+    if (!m) throw new Error("watch page has no visitorData");
+    return m[1];
+  }
+
+  async function innertubeFromPage(videoId, visitorData) {
+    var body = {
+      context: { client: {
+        clientName: "VISIONOS", clientVersion: "1.02", deviceMake: "Apple",
+        deviceModel: "RealityDevice17,1", userAgent: VISIONOS_UA,
+        osName: "visionOS", osVersion: "26.5.23O471", hl: "en", gl: "US",
+        visitorData: visitorData,
+      } },
+      videoId: videoId, contentCheckOk: true, racyCheckOk: true,
+    };
+    // No Origin / Referer: both are forbidden header names and Firefox drops
+    // them. Same-origin fetch already carries the page origin and referrer.
+    var headers = {
+      "Content-Type": "application/json",
+      "X-YouTube-Client-Name": "101", "X-YouTube-Client-Version": "1.02",
+      "X-Goog-Api-Format-Version": "2",
+    };
+    if (visitorData) headers["X-Goog-Visitor-Id"] = visitorData;
+    var res = await fetch("https://www.youtube.com/youtubei/v1/player?key=" + INNERTUBE_KEY, {
+      method: "POST", headers: headers, body: JSON.stringify(body),
+      credentials: "omit", cache: "no-store",
+    });
+    var text = await res.text();
+    if (!res.ok) {
+      var detail = text ? " — " + text.replace(/\s+/g, " ").slice(0, 160) : "";
+      throw new Error("player API HTTP " + res.status + detail);
+    }
+    try { return JSON.parse(text); } catch (e) { throw new Error("player API returned non-JSON"); }
+  }
+
+  async function resolveAudioSource(videoId) {
+    var prs = pagePlayerResponse();
+    for (var i = 0; i < prs.length; i++) {
+      var pageFormats = audioOnlyFormats(prs[i], videoId);
+      if (pageFormats.length) {
+        var pvd = prs[i].videoDetails || {};
+        return {
+          source: "page-global", videoId: videoId, formats: pageFormats,
+          title: pvd.title || "", duration: Number(pvd.lengthSeconds) || 0,
+          visitorData: pageVisitorData(),
+        };
+      }
+    }
+
+    var visitorData = pageVisitorData();
+    var lastErr = null;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (attempt > 0 || !visitorData) visitorData = await freshVisitorData(videoId);
+        var pr = await innertubeFromPage(videoId, visitorData);
+        var ps = pr.playabilityStatus || {};
+        if (ps.status !== "OK") {
+          var e1 = new Error("YouTube says " + ps.status + (ps.reason ? ": " + ps.reason : ""));
+          e1.needsFreshVisitor = /LOGIN_REQUIRED|not a bot|bot/i.test(String(ps.status) + " " + String(ps.reason || ""));
+          throw e1;
+        }
+        var formats = audioOnlyFormats(pr, videoId);
+        if (!formats.length) throw new Error("no audio-only format with a direct URL (SABR-only response)");
+        var vd = pr.videoDetails || {};
+        return {
+          source: "content-post", videoId: videoId, formats: formats, visitorData: visitorData,
+          title: vd.title || "", duration: Number(vd.lengthSeconds) || 0,
+        };
+      } catch (e) {
+        lastErr = e;
+        if (!e.needsFreshVisitor) throw e;
+      }
+    }
+    throw lastErr || new Error("could not resolve audio formats");
+  }
+
+  function provideAudioSource(videoId, reqId) {
+    if (videoIdFromUrl() !== videoId) {
+      hostSend({ type: "audio-source-failed", videoId: videoId, reqId: reqId, message: "page moved to another video" });
+      return;
+    }
+    S.statusText = "Looking up audio";
+    updateUI();
+    resolveAudioSource(videoId).then(function (source) {
+      log("page-origin audio source:", source.source, source.formats.length + " formats",
+        "itags " + source.formats.map(function (f) { return f.itag; }).join(","),
+        "visitorData " + (source.visitorData ? "yes" : "no"));
+      hostSend({ type: "audio-source", videoId: videoId, reqId: reqId, source: source });
+    }).catch(function (e) {
+      log("page-origin audio lookup failed:", String(e && e.message || e), e && e.stack);
+      hostSend({ type: "audio-source-failed", videoId: videoId, reqId: reqId, message: String(e && e.message || e) });
+    });
+  }
+
   function onStart() {
     if (S.busy) return;
     if (S.gpuError) { S.error = S.gpuError; updateUI(); return; }
@@ -891,7 +1053,11 @@
       S.adapter = a.info ? { vendor: a.info.vendor, architecture: a.info.architecture, device: a.info.device } : {};
       S.gpuError = null;
       if (S.phase === "error") setPhase("idle");
-      S.statusText = "WebGPU ready" + (S.adapter.vendor ? " · " + S.adapter.vendor + " " + (S.adapter.architecture || "") : "");
+      var adapterBits = [];
+      if (S.adapter.vendor) adapterBits.push(S.adapter.vendor);
+      if (S.adapter.architecture) adapterBits.push(S.adapter.architecture);
+      if (S.adapter.device) adapterBits.push(S.adapter.device);
+      S.statusText = "WebGPU ready" + (adapterBits.length ? " · " + adapterBits.join(" ") : "");
     } catch (e) {
       S.gpuError = "WebGPU adapter check failed: " + String(e && e.message || e);
       setPhase("error");

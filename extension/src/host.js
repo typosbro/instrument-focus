@@ -33,6 +33,7 @@
   var pending = null;          // {videoId, resolve...}
   var visitor = null, visitorAt = 0;
   var abortCtl = null;
+  var audioSourcePending = null;
 
   function send(msg, transfer) {
     if (parent) parent.postMessage(Object.assign({ __stemsHost: true }, msg), "*", transfer || []);
@@ -40,8 +41,13 @@
   function log(msg) { send({ type: "log", msg: String(msg) }); }
   function status(stage, extra) { send(Object.assign({ type: "status", stage: stage }, extra || {})); }
   function fail(stage, err) {
-    var msg = String(err && (err.stack || err.message) || err);
-    send({ type: "error", stage: stage, message: msg });
+    /* SpiderMonkey stacks do not start with "Error: <message>", so showing the
+       stack first used to hide the actual reason in Firefox. Report both. */
+    var message = String(err && err.message || err || "unknown error");
+    var stack = err && err.stack ? String(err.stack) : "";
+    if (stack && stack.indexOf(message) === -1) message += "\n" + stack;
+    else if (stack) message = stack;
+    send({ type: "error", stage: stage, message: message });
   }
 
   /* ------------------------------------------------------------- IndexedDB */
@@ -147,6 +153,32 @@
 
   var currentVideoId = null;
 
+  /* FIX A: in Firefox the innertube POST is rejected (HTTP 403 "automated
+     queries") when it leaves from the moz-extension:// origin. The content
+     script asks for this on a cache miss, runs the same request from the
+     youtube.com page origin, and returns the adaptive formats here. The audio
+     download itself still happens in this frame. */
+  function requestAudioSource(videoId) {
+    return new Promise(function (resolve, reject) {
+      var reqId = "src-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+      var timer = setTimeout(function () {
+        if (audioSourcePending && audioSourcePending.reqId === reqId) audioSourcePending = null;
+        reject(new Error("page-origin audio lookup timed out"));
+      }, 60000);
+      audioSourcePending = { reqId: reqId, videoId: videoId, resolve: resolve, reject: reject, timer: timer };
+      send({ type: "need-audio", videoId: videoId, reqId: reqId });
+    });
+  }
+
+  function settleAudioSource(reqId, ok, value) {
+    var p = audioSourcePending;
+    if (!p || p.reqId !== reqId) return;
+    audioSourcePending = null;
+    clearTimeout(p.timer);
+    if (ok) p.resolve(value);
+    else p.reject(value instanceof Error ? value : new Error(String(value)));
+  }
+
   async function innertubePlayer(videoId, visitorData) {
     var body = {
       context: { client: {
@@ -223,19 +255,30 @@
     return { L: L, R: R, length: n, sampleRate: buf.sampleRate, duration: buf.duration };
   }
 
-  async function prepareAudio(videoId, title) {
+  async function prepareAudio(videoId, title, source) {
     var t0 = performance.now();
     currentVideoId = videoId;
-    status("fetching", { msg: "Looking up audio" });
 
     var pr = null, lastErr = null;
-    for (var attempt = 0; attempt < 2 && !pr; attempt++) {
-      try {
-        var v = await getVisitor(attempt > 0);
-        pr = await innertubePlayer(videoId, v);
-      } catch (e) { lastErr = e; }
+    if (source && source.formats && source.formats.length) {
+      /* Formats resolved by content.js on the page origin. playabilityStatus was
+         already checked there; keep the shape pickAudio() expects. */
+      pr = {
+        playabilityStatus: { status: "OK" },
+        streamingData: { adaptiveFormats: source.formats },
+        videoDetails: { title: source.title || title || "", lengthSeconds: source.duration || 0 },
+      };
+      log("page-origin audio: " + source.formats.length + " format(s) via " + (source.source || "page"));
+    } else {
+      status("fetching", { msg: "Looking up audio" });
+      for (var attempt = 0; attempt < 2 && !pr; attempt++) {
+        try {
+          var v = await getVisitor(attempt > 0);
+          pr = await innertubePlayer(videoId, v);
+        } catch (e) { lastErr = e; }
+      }
+      if (!pr) throw lastErr || new Error("player lookup failed");
     }
-    if (!pr) throw lastErr || new Error("player lookup failed");
     var ps = pr.playabilityStatus || {};
     if (ps.status !== "OK") throw new Error("YouTube says " + ps.status + (ps.reason ? ": " + ps.reason : ""));
     var formats = pickAudio(pr);
@@ -352,7 +395,15 @@
         log("cache meta present but chunks missing; re-separating");
         await clearCache(videoId);
       }
-      var prep = await prepareAudio(videoId, title);
+      status("fetching", { msg: "Looking up audio" });
+      var source = null;
+      try {
+        source = await requestAudioSource(videoId);
+      } catch (e) {
+        if (e && /cancelled/.test(String(e.message || e))) throw e;
+        log("page-origin audio lookup failed: " + String(e && e.message || e));
+      }
+      var prep = await prepareAudio(videoId, title, source);
       var audio = prep.audio;
       currentVideoId = videoId;
       var w = ensureWorker();
@@ -369,6 +420,7 @@
       // The worker posts progress/ready; finishPrepare handles the rest.
     } catch (e) {
       busy = false;
+      if (e && /cancelled/.test(String(e.message || e))) { status("cancelled"); return; }
       fail("prepare", e);
     }
   }
@@ -400,6 +452,10 @@
       cacheStatus(m.videoId);
     } else if (m.type === "prepare") {
       prepare(m.videoId, m.title, m.opts);
+    } else if (m.type === "audio-source") {
+      settleAudioSource(m.reqId, true, m.source || null);
+    } else if (m.type === "audio-source-failed") {
+      settleAudioSource(m.reqId, false, new Error(m.message || "page-origin audio lookup failed"));
     } else if (m.type === "slice") {
       readSlice(m.startFrame, m.count).then(function (r) {
         send({
@@ -411,6 +467,7 @@
       });
     } else if (m.type === "cancel") {
       busy = false;
+      if (audioSourcePending) settleAudioSource(audioSourcePending.reqId, false, new Error("cancelled"));
       if (worker) worker.postMessage({ type: "cancel" });
       if (abortCtl) { try { abortCtl.abort(); } catch (e) {} }
       status("cancelled");
