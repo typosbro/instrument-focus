@@ -283,9 +283,21 @@
   }
 
   /* --------------------------------------------------------------- worker */
+  /* The host frame is served as a web-accessible resource, and in some Chrome builds that
+     leaves chrome.runtime undefined inside it. Resolve extension paths from location
+     instead, so this never depends on extension API bindings being present. */
+  var EXT_BASE = new URL('../', location.href).href;
+  function extUrl(rel) {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
+        return chrome.runtime.getURL(rel);
+      }
+    } catch (e) {}
+    return EXT_BASE + rel;
+  }
   function ensureWorker() {
     if (worker) return worker;
-    worker = new Worker(chrome.runtime.getURL("src/engine.worker.js"), { type: "module" });
+    worker = new Worker(extUrl("src/engine.worker.js"), { type: "module" });
     worker.onmessage = function (e) { onWorker(e.data || {}); };
     worker.onerror = function (e) {
       fail("worker", e.message || "worker crashed");
@@ -351,8 +363,8 @@
         title: prep.title,
         mixL: audio.L, mixR: audio.R, length: audio.length,
         sampleRate: audio.sampleRate,
-        vendorUrl: chrome.runtime.getURL("vendor/"),
-        modelUrl: chrome.runtime.getURL("models/htdemucs_6s_web.onnx"),
+        vendorUrl: extUrl("vendor/"),
+        modelUrl: extUrl("models/htdemucs_6s_web.onnx"),
       }, [audio.L.buffer, audio.R.buffer]);
       // The worker posts progress/ready; finishPrepare handles the rest.
     } catch (e) {
