@@ -88,6 +88,26 @@ function putSongMeta(db, meta) {
 }
 
 /* ------------------------------------------------------------------ engine */
+/* The published add-on cannot carry the 131 MB model as one archive entry: AMO rejects it with
+   "File exceeding size limit in archive". Ship it as fixed-size parts and stitch them back
+   together in memory. ORT accepts the bytes directly, so nothing else changes. */
+var MODEL_PARTS = 4;
+async function loadModelParts(modelUrl) {
+  var base = modelUrl.replace(/[^/]*$/, "");
+  var bufs = await Promise.all(Array.from({ length: MODEL_PARTS }, function (_, i) {
+    return fetch(base + "part" + i + ".bin").then(function (r) {
+      if (!r.ok) throw new Error("model part " + i + ": HTTP " + r.status);
+      return r.arrayBuffer();
+    });
+  }));
+  var total = 0;
+  for (var i = 0; i < bufs.length; i++) total += bufs[i].byteLength;
+  var out = new Uint8Array(total);
+  var off = 0;
+  for (var j = 0; j < bufs.length; j++) { out.set(new Uint8Array(bufs[j]), off); off += bufs[j].byteLength; }
+  return out;
+}
+
 async function ensureEngine(vendorUrl, modelUrl) {
   if (session) return engineInfo;
   if (enginePromise) return enginePromise;
@@ -110,7 +130,8 @@ async function ensureEngine(vendorUrl, modelUrl) {
     ort.env.wasm.numThreads = 1;   // youtube.com is not crossOriginIsolated
     ort.env.logLevel = "error";
     const tCreate = performance.now();
-    session = await ort.InferenceSession.create(modelUrl, {
+    var modelBytes = await loadModelParts(modelUrl);
+    session = await ort.InferenceSession.create(modelBytes, {
       // wasm is paired only because ORT-web lacks WebGPU kernels for a handful
       // of shape ops in /real_istft. This is not a whole-model WASM fallback.
       executionProviders: ["webgpu", "wasm"],
