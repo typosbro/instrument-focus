@@ -6,7 +6,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "stems-for-youtube@local",
-      "strict_min_version": "128.0"
+      "strict_min_version": "141.0"
     }
   },
   "host_permissions": [
