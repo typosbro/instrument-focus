@@ -18,6 +18,11 @@
   var SR = 44100;
   var STEMS = 6;
   var MAX_SECONDS = 12 * 60;
+  // PUBLIC CONSTANT, NOT A SECRET. This is YouTube web client key. It ships inside
+  // YouTube own JavaScript and is visible in every browser that opens youtube.com, as the
+  // request URL https://www.youtube.com/youtubei/v1/player?key=... which sits in any cache
+  // of YouTube pages. It grants no private access, is not a personal credential, and cannot
+  // be revoked by anyone except YouTube. Secret-scanner matches here are false positives.
   var INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
   var VISIONOS_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
