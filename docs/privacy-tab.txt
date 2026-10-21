@@ -1,0 +1,54 @@
+CHROME WEB STORE - PRIVACY TAB (exact text)
+
+=== 1. SINGLE PURPOSE DESCRIPTION ===  (768 / 1000 chars)
+Stems for YouTube separates the audio of the YouTube video the user is currently watching into individual instrument tracks (drums, bass, vocals, guitar, piano and a remainder), and plays those tracks in sync with the video so the user can choose how prominent each instrument is.
+
+All processing happens on the user's own device using WebGPU. The extension mutes the video element and substitutes its own mixed playback, controlled by a small panel it adds to the video page. Separated audio is cached locally per video, so replaying a video does not require processing it again.
+
+It does nothing else. It does not download or redistribute media, does not alter the video itself, does not run on any site other than YouTube, and does not collect or transmit any data.
+
+=== 2. HOST PERMISSION JUSTIFICATION ===  (790 / 1000 chars)
+Two host permissions are required, both on YouTube domains.
+
+www.youtube.com and *.youtube.com - to add the instrument panel to video watch pages and to read the current video id from the page URL, so separated audio can be cached per video. The extension does not read or modify page content beyond the video element it mutes during playback.
+
+*.googlevideo.com - YouTube serves its media files from this host. The extension requests the audio stream of the video the user is already watching, using the session the browser already has, so that it can be separated. This audio is used only on the user's own device. It is never uploaded, stored remotely, or shared.
+
+No permission is requested for anything outside this single purpose, and the extension runs on no site other than YouTube.
+
+=== 3. REMOTE CODE ===  (470 / 1000 chars)
+SELECT:  "No, I am not using Remote code"
+Justification:
+No remote code is used. The separation model (a 241 MB ONNX file) and ONNX Runtime Web, the WASM and JavaScript runtime that executes it, are both bundled inside the extension package. Nothing is loaded from an external server, no script tag points to a remote file, and no string is passed to eval() at runtime.
+
+The only network requests the extension makes are for the YouTube media the user is already playing. That is content, not code, and it is processed locally.
+
+=== 4. DATA USAGE CHECKBOXES ===
+Tick NONE of them. Leave all nine unchecked:
+  Personally identifiable information .... NO
+  Health information ..................... NO
+  Financial and payment information ...... NO
+  Authentication information ............. NO
+  Personal communications ................ NO
+  Location ............................... NO
+  Web history ............................ NO
+  User activity .......................... NO
+  Website content ........................ NO
+
+Why: Google defines collection as transmitting data off the device. Nothing here ever leaves
+the machine. The audio is read locally, separated on the local GPU, and cached in local
+IndexedDB. There is no server and no telemetry.
+
+If a reviewer objects that the extension reads the page audio, the fix is to tick
+"Website content" and explain it is processed locally only. The privacy policy already
+discloses that it reads the audio, so either answer is consistent with it.
+
+=== 5. CERTIFICATIONS - tick all three ===
+  [x] I do not sell or transfer user data to third parties, outside of the approved use cases
+  [x] I do not use or transfer user data for purposes that are unrelated to my item's single purpose
+  [x] I do not use or transfer user data to determine creditworthiness or for lending purposes
+
+=== 6. PRIVACY POLICY URL ===
+https://github.com/typosbro/instrument-focus/blob/main/docs/privacy-policy.md
+
+Then: Save Draft, go to Distribution, set visibility Unlisted for the first submission, publish.
