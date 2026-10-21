@@ -38,3 +38,7 @@ page.html
 extension/models/
 extension/vendor/
 extension/test/results/
+
+# ---- built packages are release artifacts, never committed ----
+dist/
+*.zip
