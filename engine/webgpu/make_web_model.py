@@ -10,8 +10,13 @@ import numpy as np
 import onnx
 from onnx import TensorProto, numpy_helper
 
-SRC = "models/htdemucs_6s.onnx"
-DST = "models/htdemucs_6s_web.onnx"
+import argparse
+_ap = argparse.ArgumentParser(description="Rewrite float64 constants to float32 so onnxruntime-web can load the model.")
+_ap.add_argument("--src", default="models/htdemucs_6s.onnx")
+_ap.add_argument("--dst", default="models/htdemucs_6s_web.onnx")
+_a = _ap.parse_args()
+SRC = _a.src
+DST = _a.dst
 
 m = onnx.load(SRC, load_external_data=False)
 stats = {"cast": 0, "constant": 0, "cos": 0, "initializer": 0}

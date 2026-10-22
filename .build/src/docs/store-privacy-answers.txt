@@ -1,0 +1,83 @@
+CHROME WEB STORE - PRIVACY PRACTICES TAB
+Copy these in verbatim.
+
+===========================================================
+1. SINGLE PURPOSE DESCRIPTION
+===========================================================
+
+To separate the audio of the YouTube video the user is currently watching into individual
+instrument tracks, and to play those tracks back in sync with the video so the user can control
+how loud each instrument is.
+
+One purpose only. The extension does not modify the video, download it, collect data, or act on
+any other website.
+
+===========================================================
+2. HOST PERMISSION JUSTIFICATION
+===========================================================
+
+If the form asks per host, use these. If it asks once, paste all three together.
+
+www.youtube.com and *.youtube.com
+---------------------------------
+Required to display the instrument control panel on YouTube video pages, and to read the current
+video identifier from the page URL so that separated audio can be cached per video. The extension
+does not read, modify or transmit page content; it inserts its own panel and reads the video id.
+
+*.googlevideo.com
+-----------------
+Required to request the audio stream of the video the user is already watching. YouTube serves its
+media files from this domain. The request uses the browser session that already exists. The
+returned audio is used only on the user's own device, for separation, and is never uploaded,
+stored remotely or shared.
+
+===========================================================
+3. REMOTE CODE
+===========================================================
+
+When asked whether the extension uses remote code, answer NO, and use this justification:
+
+No remote code is used. The separation model (a 241 MB ONNX file) and ONNX Runtime Web (the WASM
+and JavaScript runtime that executes it) are both bundled inside the extension package itself.
+Nothing is downloaded, eval'd or injected from a remote source at runtime. The only network
+requests the extension makes are for the YouTube media stream the user is already playing, and
+that data is content, not code.
+
+===========================================================
+4. DATA USAGE / PRIVACY PRACTICES FORM
+===========================================================
+
+Answer NO to every question below, then tick the certification checkbox at the end.
+
+  Does the extension collect personally identifiable information?          NO
+  Does it collect health information?                                     NO
+  Does it collect financial and payment information?                      NO
+  Does it collect authentication information?                             NO
+  Does it collect personal communications?                                NO
+  Does it collect location?                                               NO
+  Does it collect web history?                                            NO
+  Does it collect user activity?                                          NO
+  Does it collect website content?                                         NO
+
+Why NO to all of them: nothing leaves the device. The audio is read locally, processed on the
+user's own GPU, and cached in the browser's local IndexedDB. There is no server, no account, no
+analytics and no telemetry. Google defines collection as transmitting data off the device, and
+this extension never does that.
+
+Then:
+  - Do you sell or transfer user data to third parties?                   NO
+  - Is user data used or transferred for purposes unrelated to the
+    item's single purpose?                                                NO
+
+Privacy policy URL:
+https://github.com/typosbro/instrument-focus/blob/main/docs/privacy-policy.md
+
+Finally tick: "I certify that my data usage complies with the Developer Program Policies."
+
+===========================================================
+AFTER THAT
+===========================================================
+
+Distribution tab, then save draft, then publish.
+For the first submission set visibility to Unlisted, confirm a clean install from the store build,
+then switch to Public. Unlisted goes through the same review, so nothing is wasted.
