@@ -1,0 +1,86 @@
+AMO LISTING - copy each block into the matching field
+
+=== SUMMARY (already prefilled from the manifest, leave it) ===
+Separate any YouTube song into six stems locally with WebGPU. Offline, not live: one 7.8 s-window pass, then instant replays.
+
+=== DESCRIPTION (2227 chars) ===
+Hear one player inside a song.
+
+Click once on any YouTube video and this add-on separates the song into six parts - drums, bass, vocals, guitar, piano, and a catch-all - then plays those parts back in sync with the video so you can decide who is in front.
+
+Nothing is re-recorded. You are hearing the original performance, balanced differently. This is what a drummer does when they cover a song with their own instrument pushed forward, except the original is still playing and you choose the instrument.
+
+WHY NOT JUST USE AN EQUALISER
+Bass, mid and treble move frequency, not instruments. Drums and piano occupy the same frequency range, so turning up "high" does not turn up the piano. This separates the actual parts, which is why pushing the drums forward sounds like more drums rather than more treble.
+
+HOW IT WORKS
+- One pass over the song, about a minute, entirely on your own machine
+- The result is cached, so replays of the same video are instant
+- Click an instrument to lift it 9 dB and pull the rest back 6 dB, then the whole mix is levelled to a fixed loudness so you compare balance rather than volume
+- Seek, pause, change playback speed or switch tabs - playback stays locked to the video
+
+PRIVACY
+Nothing is uploaded. No account, no server, no analytics, no tracking. The audio is separated on your own GPU and cached in your browser's local storage. It never leaves your computer.
+
+REQUIREMENTS
+- WebGPU. Firefox 141 or newer on Windows has it enabled by default.
+- On Linux, Mozilla has not yet enabled WebGPU by default. Until they do, set dom.webgpu.enabled to true in about:config.
+- Around 7 GB of free memory while it works, and a reasonably recent graphics processor.
+
+HONEST LIMITS
+- This is not live monitoring. The model needs 7.8 seconds of audio at a time, so the first pass waits about a minute and every replay after that is instant.
+- Separation is a best guess. Soloing one instrument can sound hollow where the model dropped a transient.
+- The "other" track is a bucket, not an instrument: strings, synths and organ all land there.
+- It does not work on Spotify or other DRM services, because their audio cannot be captured.
+
+Open source, MIT licensed: github.com/typosbro/instrument-focus
+
+=== THIS ADD-ON IS EXPERIMENTAL? ===
+No.
+
+=== REQUIRES PAYMENT, NON-FREE SERVICES OR SOFTWARE, OR ADDITIONAL HARDWARE? ===
+No. WebGPU is a free, standard browser feature. It does need a reasonably recent GPU, which is
+disclosed in the description and in the reviewer notes.
+
+=== CATEGORIES (up to 3) ===
+Photos, Music & Videos
+(leave the other two empty - the list has no dedicated audio category)
+
+=== SUPPORT EMAIL ===
+(optional, leave blank unless you want review mail)
+
+=== SUPPORT WEBSITE ===
+https://github.com/typosbro/instrument-focus/issues
+
+=== LICENSE ===
+MIT License
+
+=== PRIVACY POLICY: select YES, then ===
+https://github.com/typosbro/instrument-focus/blob/main/docs/privacy-policy.md
+
+=== NOTES TO REVIEWER (2378 chars) ===
+Thank you for reviewing. A few things that will save you time.
+
+WHAT IT DOES
+On a YouTube watch page, it separates the video's audio into six stems locally and plays them back in sync with the video, so the user can emphasise one instrument. It is not a downloader: it does not save, store or redistribute media, and there is no server.
+
+HOW TO TEST IT
+1. Load the add-on and open any YouTube MUSIC video. Please pick one with actual instruments; a video with only speech will separate into near-silence and look broken.
+2. A small panel appears at the bottom right, over the sidebar. Click it.
+3. Press "Separate this song". A progress bar runs for roughly a minute on a mid-range GPU.
+4. When it finishes, click an instrument name (Drums, Piano, Vocals, Guitar, Bass, Other) to emphasise it.
+
+YOU NEED A GPU WITH WEBGPU
+This add-on requires WebGPU and there is no WASM fallback: the model is 131 MB and exceeds the wasm32 heap, so a software path would fail anyway. If WebGPU is unavailable the panel says so plainly and disables the button rather than failing silently.
+On Linux, Firefox does not enable WebGPU by default yet. Set dom.webgpu.enabled to true in about:config and run headful. Note that headless Firefox reports a null adapter even when WebGPU works, so please test headful.
+
+THE LINTER WARNINGS ARE UPSTREAM, NOT OURS
+The "Function constructor is eval" and "unsafe call to import" warnings come from ONNX Runtime Web's WASM glue in vendor/, not from add-on code. Our CSP restricts evaluation to 'self' and 'wasm-unsafe-eval'. No user input reaches any dynamic import. One warning points at src/engine.worker.js line 128, which imports a fixed local path with no variable input.
+
+BUNDLED MODEL AND SOURCE
+The add-on bundles HTDemucs-6s ONNX weights (MIT, from StemSplitio) and ONNX Runtime Web (MIT). The model is data, not executable code, and nothing is fetched at runtime. Because AMO caps individual files in the archive, the model is shipped as four 32.7 MB parts (models/part0.bin .. part3.bin) which the worker concatenates in memory before handing the bytes to ONNX Runtime.
+
+Source and build instructions: https://github.com/typosbro/instrument-focus
+
+DATA COLLECTION
+None. Declared as "none" in the manifest, and that is accurate: the audio is read from the page, separated on the user's own GPU, and cached in local IndexedDB. Nothing is transmitted.
