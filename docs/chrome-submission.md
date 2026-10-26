@@ -25,49 +25,59 @@ install instructions, and "load unpacked" is the whole install.
 
 ## Listing copy
 
-Name (max 45): Stems for YouTube - hear one instrument
+Title and summary are package fields, not listing fields. The dashboard shows them as "Title
+from package" and "Summary from package" (`extension/manifest.json` `name` and `description`:
+"Stems for YouTube" and the six-stem summary). Changing either means changing the manifest and
+uploading a new 325 MB package, and neither was flagged on 2026-10-27. Leave both alone. The
+editable fields are description, category, language, graphics and URLs.
 
-Short description (max 132):
-Separate any YouTube song into six stems on your own GPU. Push the drums forward, or the piano.
+Description - replace all 2,026 characters with this. Long lines are intentional; copy as-is.
 
-Detailed description (rewritten 2026-10-27, compliant with the keyword policy - paste the whole
-block, do not hand-edit the old one):
+Ever loved the drums in a song and wished everything else would get out of the way? This does that, on the original recording.
 
-Ever loved the drums in a song and wished everything else would get out of the way? This does
-that, on the original recording.
-
-Click once on any YouTube video and the extension separates the song into its individual parts
-with a neural network running on your own graphics card. Then it plays those parts back in sync
-with the video, and you choose which part is in front.
+Click once on any YouTube video and Stems separates the song into its individual parts with a neural network running on your own graphics card. Then it plays those parts back in sync with the video, and you decide what is in front.
 
 Nothing is re-recorded. You are hearing the original performance, balanced differently.
 
-How it works
-- One pass over the song, about a minute, fully on your device
-- Results are cached, so replays are instant
-- Click a part to lift it 9 dB and pull the rest back 6 dB
-- Playback stays in sync when you seek, pause, change speed or switch tabs
+WHY NOT JUST USE AN EQUALISER
+An equaliser moves frequency bands, not instruments. Two parts can occupy the same frequency range, so turning up "high" does not turn up the piano. This separates the actual parts, which is why pushing the drums forward sounds like more drums rather than more treble.
 
-What you need
-- A GPU with WebGPU support. Chrome 113 or newer.
-- Around 7 GB of free memory while it works.
+HOW IT WORKS
+- One pass over the song, about a minute, entirely on your own device
+- The result is cached, so replays of the same video are instant
+- Click a part to lift it 9 dB and pull the rest back 6 dB. The whole mix is then levelled to a fixed loudness, so you compare balance rather than volume
+- Seek, pause, change playback speed or switch tabs - playback stays locked to the video
 
-Honest limits
-- This is not live monitoring. The model needs 7.8 seconds of audio at a time, so the first pass
-  waits and the replays are instant.
-- Separation is a best guess. Isolating a part can sound hollow on hard transients.
-- Anything the model cannot isolate is collected on a single "other" track.
+WHAT YOU NEED
+- Chrome 113 or newer, with WebGPU
+- Around 7 GB of free memory while it works
+- A reasonably recent graphics processor. Integrated graphics from several years ago may be too slow.
+
+HONEST LIMITS
+- This is not live monitoring. The model needs 7.8 seconds of audio at a time, so the first pass waits and every replay after that is instant.
+- Separation is a best guess. Soloing one part can sound hollow where the model dropped a transient.
+- The "other" track is a bucket, not an instrument: anything the model cannot isolate lands there.
 - It does not work on Spotify or other DRM services, because their audio cannot be captured.
 
-Nothing is uploaded. No account, no server, no tracking.
+PRIVACY
+Nothing is uploaded. No account, no server, no analytics, no tracking. The audio never leaves your computer.
 
-Note: the part names are deliberately absent from the detailed description. They stay in the
-product UI, where a screenshot shows them because that is what the product looks like. Do not add
-a list back to the description to compensate - see the rejection log at the bottom of this file.
+Open source, MIT licensed: github.com/typosbro/instrument-focus
+
+Three edits from the rejected copy, nothing else changed:
+- "six parts - drums, bass, vocals, guitar, piano, and a catch-all -" became "its individual parts"
+- "Bass, mid and treble move frequency" became "An equaliser moves frequency bands"
+- "strings, synths and organ all land there" became "anything the model cannot isolate lands there"
+
+Keep the part names out of the description. They stay in the product UI, where screenshots show
+them because that is what the product looks like.
 
 ## Category
 
-Productivity, or Tools. Not "Entertainment" - reviewers look harder there.
+Entertainment (the value in the dashboard on 2026-10-27). The earlier note here said
+Productivity/Tools, but Entertainment was what got submitted and the category was not part of the
+rejection. Leave it for the resubmission; changing category mid-review adds a review question for
+no gain. Revisit after approval if discovery matters.
 
 ## Single purpose statement
 
@@ -90,12 +100,18 @@ with user-chosen emphasis.
 - Is it used for purposes unrelated to the single purpose? No.
 - Privacy policy URL: https://github.com/typosbro/instrument-focus/blob/main/docs/privacy-policy.md
 
-## Assets you still need
+## Assets
 
-- At least one 1280x800 or 640x480 screenshot
-- A 1280x800 small promo tile
-- The extension icon at 128x128, 48, 32 and 16 px. Currently there is no icon at all, so the
-  store will show a placeholder. That needs making before submission.
+The dashboard form on 2026-10-27 shows:
+
+- Store icon, 128x128, required
+- At least one screenshot, 1280x800 or 640x400, JPEG or 24-bit PNG without alpha, up to five
+- Small promo tile 440x280, optional
+- Marquee promo tile 1400x560, optional
+- Global promo video, optional
+
+The earlier note here said there was no icon at all. If the Store icon slot is still empty, fill
+it before resubmitting; a missing required asset blocks independently of the description.
 
 ## Package
 
@@ -110,19 +126,18 @@ variant of the model is 136 MB and untested.
 Item `olnifboggoicaddocjndcingckajpihb`. The listing text was rejected; the package was not.
 
 Flagged text: `drums, bass, vocals, guitar, piano, and a catch-all`. An automated metadata
-classifier reads a comma-separated product list as keyword stuffing. Note the punctuation: it
-matches `docs/amo-listing.txt:9` exactly rather than the older copy in this file, which had
-"piano and a catch-all". Confirm which text the dashboard actually holds before pasting the new
-description.
+classifier reads a comma-separated product list as keyword stuffing. Confirmed 2026-10-27 02:50:
+the dashboard was holding the AMO description verbatim (2,026 characters, including the
+equaliser paragraph and the strings/synths/organ bucket), so the AMO copy had been pasted into
+Chrome. The replacement in Listing copy keeps that structure and changes three spots.
 
-Fix applied: the enumeration is gone from the detailed description. "individual parts" carries
-the meaning; the second enumeration in the honest-limits bullet ("strings, synths and organ") was
-removed for the same reason. The item name and short description were left untouched - they are
-prose, and neither was flagged.
+Fix applied: the six-part list, the EQ-band list and the bucket list are gone from the
+description. Title and summary are package fields, never editable in the listing, and neither was
+flagged.
 
-Left alone on purpose, do not "fix" them into a rewrite: the short description and
-`docs/privacy-tab.txt:4` also name parts. The privacy tab is a required permission justification
-seen by reviewers, not store metadata, and it was not flagged.
+Left alone on purpose, do not rewrite them: `docs/privacy-tab.txt:4` names parts inside a
+required permission justification, which is not store metadata and was not flagged. The same goes
+for the AMO listing, which passed review.
 
 Owner action, in the Developer Dashboard: select the item, Build > Status, edit the listing's
 detailed description (replace all of it), then submit for review. A listing-text change needs no
