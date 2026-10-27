@@ -42,3 +42,10 @@ extension/test/results/
 # ---- built packages are release artifacts, never committed ----
 dist/
 *.zip
+
+# ---- promo video: recordings and everything cut or measured from them contain the song ----
+*.mov
+*.mkv
+promo/work/
+promo/public/
+promo/out/

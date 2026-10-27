@@ -129,6 +129,11 @@ and Vulkan is disabled. It works headful under `xvfb-run` with
 `--enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=native`. A headless-only test will
 tell you WebGPU is impossible when it is not.
 
+## Promo video
+
+`promo/` builds the vertical demo reel from two screen recordings: beat-synced cuts, an animated
+mixer driven by the recording's own audio, English and Uzbek. See [promo/README.md](promo/README.md).
+
 ## Credits
 
 [Demucs](https://github.com/facebookresearch/demucs) and HTDemucs-6s by Meta AI Research.
