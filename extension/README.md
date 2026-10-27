@@ -3,9 +3,11 @@
 Local six-stem separation for YouTube watch pages. Chrome MV3 first; a Firefox manifest is included but not verified.
 No server, no upload, no Spotify, no other sites.
 
-**This is not live monitoring.** htdemucs_6s is non-causal and always consumes a fixed 7.8 s window. The extension
-fetches the whole song, runs the model over it once with 25% overlap, caches the six stems in IndexedDB, and only
-then plays them. First run is a wait; every replay is instant.
+**Just in time, not live input.** htdemucs_6s is non-causal and always consumes a fixed 7.8 s window. The extension
+fetches the whole song, then separates it one 5.85 s stride at a time starting at the playhead, and plays each piece as
+soon as it lands; the video keeps playing with its own audio until then. Stems start about 5 s after the click
+(M1 Pro). Everything is cached in IndexedDB, so replays are instant. The sections below are the earlier,
+whole-song-first measurements.
 
 ![The injected panel, playing separated stems](shots/final_playing.png)
 

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Stems for YouTube",
   "version": "0.1.0",
-  "description": "Separate any YouTube song into six stems locally with WebGPU. Offline, not live: one 7.8 s-window pass, then instant replays.",
+  "description": "Separate any YouTube song into six stems locally with WebGPU. Stems start a few seconds after the click; replays are instant.",
   "minimum_chrome_version": "113",
   "host_permissions": [
     "*://www.youtube.com/*",
