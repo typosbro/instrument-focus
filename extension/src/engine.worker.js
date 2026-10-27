@@ -3,8 +3,9 @@
  * worker owned by the extension-origin host frame, so the page CSP cannot block
  * it. The model is non-causal and always consumes a fixed 7.8 s window; this
  * worker overlaps windows by 25% (same window/weighting as the published
- * infer.py) and writes the six stems to extension-origin IndexedDB in 15 s
- * chunks, so no context ever holds the whole separated song.
+ * infer.py) and writes the six stems to extension-origin IndexedDB one stride
+ * (5.85 s) at a time, nearest the playhead first, so playback can start after
+ * the first window and no context ever holds the whole separated song.
  */
 "use strict";
 
@@ -13,7 +14,6 @@ const SEG = 343980;            // 7.8 s @ 44.1 kHz, fixed by the model
 const OVERLAP = SEG >> 2;      // 85,995
 const STRIDE = SEG - OVERLAP;  // 257,985
 const STEMS = 6;
-const CACHE_FRAMES = 15 * SR;  // 661,500 frames per cache chunk
 const STORE_SCALE = 4;         // int16 headroom: values up to +/-4.0
 const I16 = 32767 / STORE_SCALE;
 const DB_NAME = "stems-yt-cache";
@@ -174,12 +174,23 @@ function makeWindow() {
 }
 
 /* -------------------------------------------------------------- separation */
+/* Just-in-time order. Window i starts at i * STRIDE and cache chunk i holds
+   frames [i * STRIDE, (i + 1) * STRIDE), which are final once windows i-1 and i
+   have been added. Chunks are separated starting at the playhead, so the page
+   can play stems a window after the click instead of after the whole song.
+   Walking forward carries the overlap state, so a straight run costs exactly
+   one window per chunk and matches the old whole-song pass sample for sample.
+   A jump (seek) costs one extra warm-up window to rebuild the overlap. */
+const LEAD_FRAMES = 2 * SR;    // aim slightly ahead: the playhead moves while we compute
+let targetFrame = 0;
+
 async function separate(job) {
   const t0 = performance.now();
   const { mixL, mixR, length, videoId, title } = job;
   if (!(mixL instanceof Float32Array) || !(mixR instanceof Float32Array)) throw new Error("bad mix buffers");
   if (mixL.length !== length || mixR.length !== length) throw new Error("mix length mismatch");
   if (length < 1) throw new Error("empty audio");
+  targetFrame = Math.max(0, Math.min(length - 1, Math.floor(job.startFrame || 0)));
   const engine = await ensureEngine(job.vendorUrl, job.modelUrl);
   const db = await openDB();
 
@@ -198,12 +209,8 @@ async function separate(job) {
   const weight = new Float32Array(SEG);
 
   const cacheBufs = [];
-  for (let s = 0; s < STEMS; s++) cacheBufs.push(new Int16Array(CACHE_FRAMES * 2));
-  let cacheFill = 0;
-  let cacheChunkIndex = 0;
-  let cacheChunksWritten = 0;
+  for (let s = 0; s < STEMS; s++) cacheBufs.push(new Int16Array(STRIDE * 2));
   let cacheWriteMs = 0;
-  const chunkCount = Math.max(1, Math.ceil(length / CACHE_FRAMES));
 
   const sumSq = new Float64Array(STEMS);
   const peak = new Float64Array(STEMS);
@@ -213,7 +220,7 @@ async function separate(job) {
   let sampled = 0;
   const CORR_STRIDE = 16;
   const vals = new Float32Array(STEMS);
-  const invWeight = new Float32Array(SEG);
+  const invWeight = new Float32Array(STRIDE);
   // 250 ms peak envelope per stem: lets the page pick a tight, still-guaranteed
   // peak-safe master gain instead of the very conservative whole-song sum.
   const BLOCK_FRAMES = SR / 4;
@@ -221,34 +228,43 @@ async function separate(job) {
   const blockPeaks = new Float32Array(STEMS * blockCount);
 
   const nChunks = Math.max(1, Math.ceil(length / STRIDE));
+  const chunkDone = new Uint8Array(nChunks);
+  let chunksDone = 0, warmups = 0;
   const chunkTimes = [];
   const totalAudioSec = length / SR;
   let lastProgressPost = 0;
 
-  async function writeCacheChunk() {
-    if (cacheFill <= 0) return;
-    const t = performance.now();
-    await putChunkSet(db, videoId, cacheChunkIndex, cacheBufs, cacheFill);
-    cacheWriteMs += performance.now() - t;
-    cacheChunksWritten++;
-    cacheChunkIndex++;
-    cacheFill = 0;
-    for (let s = 0; s < STEMS; s++) cacheBufs[s].fill(0);
+  const meta = {
+    videoId: videoId,
+    title: title || "",
+    length: length,
+    duration: length / SR,
+    sampleRate: SR,
+    chunkFrames: STRIDE,
+    chunkCount: nChunks,
+    storeScale: STORE_SCALE,
+    blockFrames: BLOCK_FRAMES,
+    blockCount: blockCount,
+    model: "htdemucs_6s_web",
+    engine: engineInfo,
+  };
+  post({ type: "started", meta: meta });
+
+  function resetOverlap() {
+    for (let s = 0; s < STEMS; s++) acc[s].fill(0);
+    weight.fill(0);
   }
 
-  for (let i = 0; i < nChunks; i++) {
-    if (cancelled) throw new Error("cancelled");
+  async function runWindow(i) {
     const start = i * STRIDE;
     const clen = Math.min(SEG, length - start);
-    if (clen <= 0) break;
     inData.fill(0);
     inData.set(mixL.subarray(start, start + clen), 0);
     inData.set(mixR.subarray(start, start + clen), SEG);
-    const tChunk = performance.now();
+    const tRun = performance.now();
     const out = await session.run({ [inName]: input });
     const data = out[outName].data;
-    chunkTimes.push(performance.now() - tChunk);
-
+    chunkTimes.push(performance.now() - tRun);
     for (let s = 0; s < STEMS; s++) {
       const a = acc[s];
       const base = s * 2 * SEG;
@@ -259,105 +275,133 @@ async function separate(job) {
       }
     }
     for (let t = 0; t < clen; t++) weight[t] += windowW[t];
+  }
 
-    const isLast = i === nChunks - 1;
-    const flushLen = isLast ? Math.min(SEG, length - start) : STRIDE;
-    let done = 0;
-    while (done < flushLen) {
-      const take = Math.min(flushLen - done, CACHE_FRAMES - cacheFill);
-      // One reciprocal per sample instead of one division per stem per sample.
+  function shiftOverlap() {
+    for (let s = 0; s < STEMS; s++) {
+      const a = acc[s];
+      a.copyWithin(0, STRIDE, SEG);
+      a.copyWithin(SEG, SEG + STRIDE, 2 * SEG);
+      a.fill(0, SEG - STRIDE, SEG);
+      a.fill(0, 2 * SEG - STRIDE, 2 * SEG);
+    }
+    weight.copyWithin(0, STRIDE, SEG);
+    weight.fill(0, SEG - STRIDE, SEG);
+  }
+
+  // Normalise the first `take` frames of the accumulator into int16 chunk
+  // buffers and fold them into the whole-song statistics.
+  function flush(chunkBase, take) {
+    for (let t = 0; t < take; t++) {
+      const wt = weight[t];
+      invWeight[t] = wt > 1e-8 ? 1 / wt : 1e8;
+    }
+    const blkStart = (chunkBase / BLOCK_FRAMES) | 0;
+    const blkRemain = BLOCK_FRAMES - (chunkBase - blkStart * BLOCK_FRAMES);
+    for (let s = 0; s < STEMS; s++) {
+      const a = acc[s], buf = cacheBufs[s], base = s * blockCount;
+      let ssq = 0, pk = 0;
+      let blk = base + blkStart;
+      let left = blkRemain;
       for (let t = 0; t < take; t++) {
-        const wt = weight[done + t];
-        invWeight[t] = wt > 1e-8 ? 1 / wt : 1e8;
-      }
-      const chunkBase = start + done;
-      const blkStart = (chunkBase / BLOCK_FRAMES) | 0;
-      let blkRemain = BLOCK_FRAMES - (chunkBase - blkStart * BLOCK_FRAMES);
-      for (let s = 0; s < STEMS; s++) {
-        const a = acc[s], buf = cacheBufs[s], base = s * blockCount;
-        let ssq = 0, pk = 0;
-        let blk = base + blkStart;
-        let left = blkRemain;
-        for (let t = 0; t < take; t++) {
-          const iw = invWeight[t];
-          const idx = done + t;
-          const l = a[idx] * iw;
-          const r = a[SEG + idx] * iw;
-          let li = Math.round(l * I16);
-          let ri = Math.round(r * I16);
-          if (li > 32767) li = 32767; else if (li < -32768) li = -32768;
-          if (ri > 32767) ri = 32767; else if (ri < -32768) ri = -32768;
-          const o = 2 * (cacheFill + t);
-          buf[o] = li;
-          buf[o + 1] = ri;
-          ssq += l * l + r * r;
-          let m = l + r;
-          if (m < 0) m = -m;
-          m *= 0.5;
-          if (m > pk) pk = m;
-          if (m > blockPeaks[blk]) blockPeaks[blk] = m;
-          if (--left === 0) { left = BLOCK_FRAMES; blk++; }
-        }
-        sumSq[s] += ssq;
-        if (pk > peak[s]) peak[s] = pk;
-      }
-      // Correlation on every 16th frame (mono sum), independent pass.
-      const first = (CORR_STRIDE - (chunkBase % CORR_STRIDE)) % CORR_STRIDE;
-      for (let t = first; t < take; t += CORR_STRIDE) {
         const iw = invWeight[t];
-        const idx = done + t;
-        sampled++;
-        for (let s = 0; s < STEMS; s++) vals[s] = (acc[s][idx] + acc[s][SEG + idx]) * iw * 0.5;
-        for (let s = 0; s < STEMS; s++) {
-          const v = vals[s];
-          sampSum[s] += v;
-          sampSq[s] += v * v;
-          for (let q = s; q < STEMS; q++) {
-            const p = v * vals[q];
-            cross[s * STEMS + q] += p;
-            if (q !== s) cross[q * STEMS + s] += p;
-          }
+        const l = a[t] * iw;
+        const r = a[SEG + t] * iw;
+        let li = Math.round(l * I16);
+        let ri = Math.round(r * I16);
+        if (li > 32767) li = 32767; else if (li < -32768) li = -32768;
+        if (ri > 32767) ri = 32767; else if (ri < -32768) ri = -32768;
+        buf[2 * t] = li;
+        buf[2 * t + 1] = ri;
+        ssq += l * l + r * r;
+        let m = l + r;
+        if (m < 0) m = -m;
+        m *= 0.5;
+        if (m > pk) pk = m;
+        if (m > blockPeaks[blk]) blockPeaks[blk] = m;
+        if (--left === 0) { left = BLOCK_FRAMES; blk++; }
+      }
+      sumSq[s] += ssq;
+      if (pk > peak[s]) peak[s] = pk;
+    }
+    // Correlation on every 16th frame (mono sum), independent pass.
+    const first = (CORR_STRIDE - (chunkBase % CORR_STRIDE)) % CORR_STRIDE;
+    for (let t = first; t < take; t += CORR_STRIDE) {
+      const iw = invWeight[t];
+      sampled++;
+      for (let s = 0; s < STEMS; s++) vals[s] = (acc[s][t] + acc[s][SEG + t]) * iw * 0.5;
+      for (let s = 0; s < STEMS; s++) {
+        const v = vals[s];
+        sampSum[s] += v;
+        sampSq[s] += v * v;
+        for (let q = s; q < STEMS; q++) {
+          const p = v * vals[q];
+          cross[s * STEMS + q] += p;
+          if (q !== s) cross[q * STEMS + s] += p;
         }
       }
-      cacheFill += take;
-      done += take;
-      if (cacheFill === CACHE_FRAMES) {
-        await writeCacheChunk();
+    }
+  }
+
+  // The first unfinished chunk at or after the playhead, else the first unfinished one.
+  function nextChunk() {
+    const want = Math.min(nChunks - 1, Math.floor((targetFrame + LEAD_FRAMES) / STRIDE));
+    for (let c = want; c < nChunks; c++) if (!chunkDone[c]) return c;
+    for (let c = 0; c < want; c++) if (!chunkDone[c]) return c;
+    return -1;
+  }
+
+  let prev = -2;
+  while (chunksDone < nChunks) {
+    if (cancelled) throw new Error("cancelled");
+    const c = nextChunk();
+    if (c !== prev + 1) {
+      resetOverlap();
+      if (c > 0) {
+        await runWindow(c - 1);
+        shiftOverlap();
+        warmups++;
         if (cancelled) throw new Error("cancelled");
       }
     }
-    if (!isLast) {
-      for (let s = 0; s < STEMS; s++) {
-        const a = acc[s];
-        a.copyWithin(0, STRIDE, SEG);
-        a.copyWithin(SEG, SEG + STRIDE, 2 * SEG);
-        a.fill(0, SEG - STRIDE, SEG);
-        a.fill(0, 2 * SEG - STRIDE, 2 * SEG);
-      }
-      weight.copyWithin(0, STRIDE, SEG);
-      weight.fill(0, SEG - STRIDE, SEG);
-    }
+    await runWindow(c);
+    const chunkBase = c * STRIDE;
+    const take = Math.min(STRIDE, length - chunkBase);
+    flush(chunkBase, take);
+    shiftOverlap();
+    prev = c;
+
+    const tWrite = performance.now();
+    await putChunkSet(db, videoId, c, cacheBufs, take);
+    cacheWriteMs += performance.now() - tWrite;
+    chunkDone[c] = 1;
+    chunksDone++;
+    const b0 = (chunkBase / BLOCK_FRAMES) | 0;
+    const b1 = Math.min(blockCount, Math.ceil((chunkBase + take) / BLOCK_FRAMES));
+    const peaks = [];
+    for (let s = 0; s < STEMS; s++) peaks.push(Array.from(blockPeaks.subarray(s * blockCount + b0, s * blockCount + b1)));
+    post({ type: "chunk-ready", videoId: videoId, chunk: c, blockStart: b0, blockPeaks: peaks });
 
     const elapsed = performance.now() - t0;
-    const audioDone = Math.min(totalAudioSec, (i + 1) * STRIDE / SR);
-    if (performance.now() - lastProgressPost > 120 || isLast) {
+    if (performance.now() - lastProgressPost > 120 || chunksDone === nChunks) {
       lastProgressPost = performance.now();
+      const audioDone = Math.min(totalAudioSec, chunksDone * STRIDE / SR);
       post({
-        type: "progress", done: i + 1, total: nChunks,
+        type: "progress", done: chunksDone, total: nChunks,
         chunkMs: chunkTimes[chunkTimes.length - 1],
-        avgMs: elapsed / (i + 1),
+        avgMs: elapsed / chunksDone,
         elapsedMs: elapsed,
         audioDoneSec: audioDone,
         audioTotalSec: totalAudioSec,
         rtf: elapsed / 1000 / Math.max(0.001, audioDone),
-        etaMs: Math.max(0, (nChunks - i - 1) * (elapsed / (i + 1))),
-        cacheWritten: cacheChunksWritten,
-        cacheTotal: chunkCount,
+        etaMs: Math.max(0, (nChunks - chunksDone) * (elapsed / chunksDone)),
+        cacheWritten: chunksDone,
+        cacheTotal: nChunks,
+        firstChunkMs: chunksDone === 1 ? elapsed : undefined,
       });
     }
     await new Promise((r) => setTimeout(r, 0));
   }
-  if (cacheFill > 0) await writeCacheChunk();
 
   const corr = [], varArr = new Float64Array(STEMS);
   if (sampled > 0) {
@@ -389,26 +433,15 @@ async function separate(job) {
     stemPeak.push(peak[s]);
   }
   const totalMs = performance.now() - t0;
-  const meta = {
-    videoId: videoId,
-    title: title || "",
-    length: length,
-    duration: length / SR,
-    sampleRate: SR,
-    chunkFrames: CACHE_FRAMES,
-    chunkCount: cacheChunkIndex,
-    storeScale: STORE_SCALE,
-    blockFrames: BLOCK_FRAMES,
-    blockCount: blockCount,
+  Object.assign(meta, {
     blockPeaks: Array.from(blockPeaks),
     stemRms: stemRms,
     stemPeak: stemPeak,
     corrMin: corrMin,
     corrMax: corrMax,
     createdAt: Date.now(),
-    model: "htdemucs_6s_web",
-    engine: engineInfo,
-  };
+  });
+  // Written last: a song only counts as cached once every chunk is in.
   const tMeta = performance.now();
   await putSongMeta(db, meta);
   cacheWriteMs += performance.now() - tMeta;
@@ -426,6 +459,7 @@ async function separate(job) {
       cacheWriteMs: cacheWriteMs,
       deleteMs: deleteMs,
       chunks: nChunks,
+      warmups: warmups,
       chunkTimes: chunkTimes.map((x) => +x.toFixed(1)),
       audioSec: totalAudioSec,
       rtf: totalMs / 1000 / totalAudioSec,
@@ -443,6 +477,8 @@ self.onmessage = async (e) => {
     } else if (m.type === "separate") {
       cancelled = false;
       await separate(m);
+    } else if (m.type === "priority") {
+      targetFrame = Math.max(0, Math.floor(m.frame || 0));
     } else if (m.type === "cancel") {
       cancelled = true;
     }

@@ -49,6 +49,7 @@
     startedAt: 0, readyAt: 0, lastUI: 0, reanchoring: false,
     buffering: false, lastClock: -1, lastClockChange: 0, lastReanchorAt: 0,
     awaitingSlice: false, settleTimer: 0, reanchorLog: [],
+    partial: false, chunkReady: null, gap: false, lastPriorityAt: 0,
   };
 
   /* ------------------------------------------------------------------ utils */
@@ -138,6 +139,8 @@
       return;
     }
     if (m.type === "status") { onStatus(m); return; }
+    if (m.type === "partial-start") { onPartialStart(m); return; }
+    if (m.type === "chunk-ready") { onChunkReady(m); return; }
     if (m.type === "ready") { onReady(m); return; }
     if (m.type === "slice") { onSlice(m); return; }
     if (m.type === "slice-error") {
@@ -182,7 +185,8 @@
       if (m.progress) {
         S.progress = m.progress;
         var pr = m.progress;
-        var base = "Separating " + pr.done + "/" + pr.total;
+        var base = (S.partial ? (S.gap ? "Original audio until stems catch up · " : "Stems live · separating ahead ") : "Separating ") +
+          pr.done + "/" + pr.total;
         if (pr.etaMs != null) base += " · ETA " + fmtTime(pr.etaMs / 1000);
         base += " · RTF " + (pr.rtf || 0).toFixed(2);
         S.statusText = base;
@@ -199,7 +203,60 @@
     updateUI();
   }
 
+  /* Just-in-time start: the worker has the song and will deliver chunks nearest
+     the playhead first. Build the mixer now; tick() plays stems wherever a chunk
+     is ready and leaves the original video audio on everywhere else. */
+  function onPartialStart(m) {
+    S.meta = m.meta;
+    S.meta.blockPeaks = new Float32Array(STEMS.length * m.meta.blockCount);
+    S.partial = true;
+    S.chunkReady = new Uint8Array(m.meta.chunkCount);
+    S.gap = false;
+    S.stats = null;
+    S.sliceCache.clear();
+    S.pending.clear();
+    ensureAudio();
+    buildMixer();
+    applyGains(true);
+    S.statusText = "Separating at the playhead · original audio for now";
+    updateUI();
+  }
+
+  function onChunkReady(m) {
+    if (!S.partial || !S.meta || m.videoId !== S.meta.videoId) return;
+    S.chunkReady[m.chunk] = 1;
+    // The peak-safe trim is a max over blocks, so it only ever comes down as
+    // chunks land; it never jumps up mid-song.
+    var bp = S.meta.blockPeaks, bc = S.meta.blockCount;
+    for (var s = 0; s < STEMS.length; s++) {
+      var src = m.blockPeaks[s] || [];
+      for (var k = 0; k < src.length; k++) {
+        var at = s * bc + m.blockStart + k;
+        if (src[k] > bp[at]) bp[at] = src[k];
+      }
+    }
+    applyGains(false);
+    tick();
+  }
+
+  function playheadChunk() {
+    var v = video();
+    var idx = Math.floor((v ? v.currentTime : 0) * SR / chunkFrames());
+    return clamp(idx, 0, S.meta.chunkCount - 1);
+  }
+
+  function sendPriority(force) {
+    var v = video();
+    if (!v) return;
+    var now = performance.now();
+    if (!force && now - S.lastPriorityAt < 1000) return;
+    S.lastPriorityAt = now;
+    hostSend({ type: "priority", sec: v.currentTime });
+  }
+
   function onReady(m) {
+    var wasPartial = S.partial;
+    S.partial = false; S.chunkReady = null; S.gap = false;
     S.meta = m.meta;
     S.stats = m.stats || {
       stemRms: m.meta.stemRms, stemPeak: m.meta.stemPeak,
@@ -211,6 +268,14 @@
     S.readyAt = performance.now();
     S.progress = null;
     S.error = null;
+    if (wasPartial) {
+      // Already playing from partial chunks; only the final stats change.
+      applyGains(false);
+      setPhase(S.sources.length ? "playing" : "ready");
+      S.statusText = "Separated · 6 stems · cached for replays";
+      updateUI();
+      return;
+    }
     ensureAudio();
     buildMixer();
     applyGains(true);
@@ -221,6 +286,7 @@
       S.statusText = "Ready · waiting for the ad to end";
     } else if (S.wasPlaying) {
       var v = video();
+      muteVideo();
       if (v) {
         var pl = v.play();
         if (pl && pl.catch) pl.catch(function () {});
@@ -340,6 +406,7 @@
   function ensureSlice(idx) {
     if (!S.meta) return Promise.reject(new Error("no song"));
     if (idx < 0 || idx >= S.meta.chunkCount) return Promise.resolve(null);
+    if (S.partial && !S.chunkReady[idx]) return Promise.resolve(null);
     if (S.sliceCache.has(idx)) return Promise.resolve(S.sliceCache.get(idx));
     if (S.pending.has("idx:" + idx)) return S.pending.get("idx:" + idx).promise;
     var reqId = ++S.reqSeq;
@@ -525,6 +592,8 @@
   function tick() {
     if (!mounted) return;
     var v = video();
+    // Before the worker starts, keep it pointed at wherever the video has got to.
+    if (S.busy && !S.meta && v && !v.paused) sendPriority(false);
     if (!S.meta || !v) { updateDiag(); return; }
     var nowMs = performance.now();
     if (v.currentTime !== S.lastClock) { S.lastClock = v.currentTime; S.lastClockChange = nowMs; }
@@ -563,6 +632,24 @@
       if (!v.paused) reanchor("ad-end");
       updateUI();
     }
+    if (S.partial && !v.ended) {
+      if (!S.chunkReady[playheadChunk()]) {
+        // Not separated here yet: original audio, and pull the worker to this spot.
+        if (!S.gap) {
+          S.gap = true;
+          stopSources();
+          S.playing = false;
+          unmuteVideoIfOurs();
+        }
+        if (!v.paused) sendPriority(false);
+        analyse(); updateDiag(); return;
+      }
+      if (S.gap) {
+        S.gap = false;
+        muteVideo();
+        if (!v.paused) reanchor("slice-ready");
+      }
+    }
     if (S.meta) muteVideo();
     if (!v || v.ended) {
       stopSources(); S.playing = false;
@@ -596,19 +683,19 @@
     if ($("stems-yt-root")) return;
     var root = el("div"); root.id = "stems-yt-root";
     var pill = el("button", "stems-pill"); pill.id = "stems-toggle"; pill.type = "button";
-    pill.title = "Stems — separate this video locally (offline · 7.8 s window)";
+    pill.title = "Stems — separate this video locally on your GPU";
     pill.innerHTML = "<span class='stems-dot'></span><span>STEMS</span>";
 
     var panel = el("div", "stems-panel"); panel.id = "stems-panel"; panel.hidden = true;
     var head = el("div", "stems-head");
     var hname = el("div", "stems-name"); hname.textContent = "STEMS";
-    var sub = el("span", "stems-sub"); sub.textContent = "offline";
+    var sub = el("span", "stems-sub"); sub.textContent = "local";
     hname.appendChild(sub);
     var minBtn = el("button", "stems-min", "×"); minBtn.type = "button"; minBtn.title = "Minimize";
     head.appendChild(hname); head.appendChild(minBtn);
 
     var note = el("div", "stems-note");
-    note.textContent = "Non-causal model: 7.8 s window. First run separates the whole song; replays are instant. This is not live monitoring.";
+    note.textContent = "Stems start a few seconds after you press the button and are separated just ahead of the playhead; the original audio fills in until they catch up. Replays come from the cache.";
     var title = el("div", "stems-title"); title.id = "stems-title"; title.textContent = "No song yet";
     var status = el("div", "stems-status"); status.id = "stems-status"; status.textContent = "Checking WebGPU…";
     var barWrap = el("div", "stems-bar"); var bar = el("i"); bar.id = "stems-fill"; barWrap.appendChild(bar);
@@ -973,20 +1060,26 @@
     S.wasPlaying = inAd ? true : (!v.paused && !v.ended);
     S.startAt = v.currentTime;
     S.busy = true;
+    S.partial = false; S.chunkReady = null; S.gap = false;
     S.statusText = inAd ? "Ad playing — separating anyway; stems join when it ends" : "Checking WebGPU…";
     setPhase("preparing");
-    if (!inAd) {
-      try { v.pause(); } catch (e) {}
-      muteVideo();
-    }
+    // The video keeps playing with its own audio; stems take over chunk by chunk.
     ensureAudio();
     ensureHost();
-    hostSend({ type: "prepare", videoId: id, title: S.title, opts: {} });
+    hostSend({ type: "prepare", videoId: id, title: S.title, opts: { startSec: v.currentTime } });
     updateUI();
   }
 
   function onCancel() {
     hostSend({ type: "cancel" });
+    if (S.partial) {
+      clearTimeout(S.settleTimer);
+      stopSources();
+      S.meta = null; S.stats = null;
+      S.partial = false; S.chunkReady = null; S.gap = false;
+      S.sliceCache.clear(); S.pending.clear();
+      var mx = $("stems-mixer"); if (mx) mx.hidden = true;
+    }
     S.busy = false;
     S.statusText = "Cancelled";
     setPhase("stopped");
@@ -1001,6 +1094,7 @@
     S.playing = false;
     S.busy = false;
     S.meta = null; S.stats = null; S.timings = null; S.progress = null;
+    S.partial = false; S.chunkReady = null; S.gap = false;
     S.sliceCache.clear(); S.pending.clear();
     var mx = $("stems-mixer"); if (mx) mx.hidden = true;
     S.statusText = "Stopped — video audio restored";
@@ -1028,6 +1122,7 @@
     S.videoId = mountedFor;
     S.title = pageTitle();
     S.meta = null; S.stats = null; S.phase = "idle"; S.cached = false; S.progress = null;
+    S.partial = false; S.chunkReady = null; S.gap = false;
     S.error = null; S.busy = false; S.statusText = "Checking WebGPU…";
     S.sliceCache.clear(); S.pending.clear();
     stopSources();
@@ -1067,7 +1162,7 @@
 
   function watchVideoEvents() {
     var listeners = {
-      play: function () { if (S.meta) { muteVideo(); if (!isAd()) reanchor("play"); } },
+      play: function () { if (S.meta && !S.gap) { muteVideo(); if (!isAd()) reanchor("play"); } },
       playing: function () { if (S.meta && !isAd()) reanchor("playing"); },
       pause: function () { stopSources(); S.playing = false; updateDiag(); },
       waiting: function () {
@@ -1076,7 +1171,10 @@
         S.statusText = "Video buffering — stems paused"; updateUI();
       },
       seeking: function () { stopSources(); S.playing = false; },
-      seeked: function () { if (S.meta && !video().paused && !isAd()) reanchor("seeked"); },
+      seeked: function () {
+        if (S.partial) sendPriority(true);
+        if (S.meta && !video().paused && !isAd()) reanchor("seeked");
+      },
       ratechange: function () { if (S.meta && !isAd()) reanchor("ratechange"); },
       ended: function () { stopSources(); S.playing = false; },
       volumechange: function () {

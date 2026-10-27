@@ -34,6 +34,7 @@
   var visitor = null, visitorAt = 0;
   var abortCtl = null;
   var audioSourcePending = null;
+  var priorityFrame = 0;       // latest playhead from the page, in frames
 
   function send(msg, transfer) {
     if (parent) parent.postMessage(Object.assign({ __stemsHost: true }, msg), "*", transfer || []);
@@ -353,6 +354,12 @@
       status("engine", { msg: m.msg, adapter: m.adapter, engineMs: m.createMs });
     } else if (m.type === "engine-ready") {
       log("engine ready in " + Math.round(m.info.totalMs) + " ms");
+    } else if (m.type === "started") {
+      // Partial meta: enough to serve slices for chunks as they land.
+      current = { videoId: m.meta.videoId, meta: m.meta, source: "partial" };
+      send({ type: "partial-start", meta: m.meta });
+    } else if (m.type === "chunk-ready") {
+      send({ type: "chunk-ready", videoId: m.videoId, chunk: m.chunk, blockStart: m.blockStart, blockPeaks: m.blockPeaks });
     } else if (m.type === "progress") {
       status("separating", { progress: m });
     } else if (m.type === "ready") {
@@ -396,6 +403,9 @@
         await clearCache(videoId);
       }
       status("fetching", { msg: "Looking up audio" });
+      priorityFrame = Math.max(0, Math.floor(((opts && opts.startSec) || 0) * SR));
+      // Start the engine now so session creation overlaps the audio download.
+      ensureWorker().postMessage({ type: "init", vendorUrl: extUrl("vendor/"), modelUrl: extUrl("models/htdemucs_6s_web.onnx") });
       var source = null;
       try {
         source = await requestAudioSource(videoId);
@@ -414,6 +424,7 @@
         title: prep.title,
         mixL: audio.L, mixR: audio.R, length: audio.length,
         sampleRate: audio.sampleRate,
+        startFrame: priorityFrame,
         vendorUrl: extUrl("vendor/"),
         modelUrl: extUrl("models/htdemucs_6s_web.onnx"),
       }, [audio.L.buffer, audio.R.buffer]);
@@ -456,6 +467,9 @@
       settleAudioSource(m.reqId, true, m.source || null);
     } else if (m.type === "audio-source-failed") {
       settleAudioSource(m.reqId, false, new Error(m.message || "page-origin audio lookup failed"));
+    } else if (m.type === "priority") {
+      priorityFrame = Math.max(0, Math.floor((m.sec || 0) * SR));
+      if (worker) worker.postMessage({ type: "priority", frame: priorityFrame });
     } else if (m.type === "slice") {
       readSlice(m.startFrame, m.count).then(function (r) {
         send({
