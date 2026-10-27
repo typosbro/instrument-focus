@@ -852,6 +852,8 @@
         buffered: (function () { var a = []; for (var i = 0; i < v.buffered.length; i++) a.push([+v.buffered.start(i).toFixed(1), +v.buffered.end(i).toFixed(1)]); return a; })(),
       } : null,
       buffering: S.buffering,
+      partial: S.partial, gap: S.gap,
+      chunksReady: S.chunkReady ? S.chunkReady.reduce(function (n, x) { return n + x; }, 0) : null,
       ad: S.adActive,
       ctx: S.ctx ? { state: S.ctx.state, sampleRate: S.ctx.sampleRate, time: +S.ctx.currentTime.toFixed(3) } : null,
       anchor: S.anchor ? { media: +S.anchor.media.toFixed(3), ctx: +S.anchor.ctx.toFixed(3), rate: S.anchor.rate, reason: S.anchor.reason } : null,

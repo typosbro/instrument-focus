@@ -349,7 +349,11 @@
     return worker;
   }
 
+  var workerT0 = 0;
   function onWorker(m) {
+    if (m.type !== "progress" && (m.type !== "chunk-ready" || m.chunk === undefined || !workerT0)) {
+      log("worker " + m.type + (m.msg ? " (" + m.msg + ")" : "") + " +" + Math.round(performance.now() - workerT0) + " ms");
+    }
     if (m.type === "engine-status") {
       status("engine", { msg: m.msg, adapter: m.adapter, engineMs: m.createMs });
     } else if (m.type === "engine-ready") {
@@ -418,6 +422,8 @@
       currentVideoId = videoId;
       var w = ensureWorker();
       busy = true;
+      workerT0 = performance.now();
+      log("decoded " + (audio.length / SR).toFixed(1) + " s; sending to worker");
       w.postMessage({
         type: "separate",
         videoId: videoId,

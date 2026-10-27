@@ -4,8 +4,10 @@
 #   ./scripts/build_model.sh
 #
 # Produces, under extension/models/:
-#   htdemucs_6s_web.onnx   the converted model (not shipped directly)
+#   htdemucs_6s_web.onnx   the converted, cut model (not shipped directly)
 #   part0.bin .. part3.bin the four parts that ARE shipped
+#
+# Needs python3 with the onnx package (pip install onnx).
 #
 # Then package with scripts/package.sh (Chrome) or the commands in
 # docs/source-submission.md (Firefox).
@@ -20,7 +22,7 @@ mkdir -p "$MODELS" "$WORK"
 
 # 1. fetch the published fp16-weights export
 if [ ! -f "$WORK/htdemucs_6s_fp16weights.onnx" ]; then
-  echo "[1/3] downloading htdemucs_6s_fp16weights.onnx (~136 MB)"
+  echo "[1/4] downloading htdemucs_6s_fp16weights.onnx (~136 MB)"
   curl -L --fail --progress-bar -o "$WORK/htdemucs_6s_fp16weights.onnx" "$MODEL_URL"
 fi
 
@@ -28,16 +30,23 @@ fi
 #    The published export computes its inverse STFT in float64, and onnxruntime-web
 #    ships no float64 kernels, so it fails with "Could not find an implementation for
 #    ConstantOfShape(9)". 341 Constant nodes and 1 ConstantOfShape are affected.
-echo "[2/3] converting float64 constants to float32"
+echo "[2/4] converting float64 constants to float32"
 python3 "$ROOT/engine/webgpu/make_web_model.py" \
   --src "$WORK/htdemucs_6s_fp16weights.onnx" \
+  --dst "$WORK/htdemucs_6s_full_web.onnx"
+
+# 3. cut the inverse STFT out of the graph; the worker does it in JS.
+#    ~16k shape/scatter nodes that ran on the WASM fallback, and 41 MB of constants.
+echo "[3/4] cutting the inverse STFT out of the graph"
+python3 "$ROOT/engine/webgpu/cut_istft.py" \
+  --src "$WORK/htdemucs_6s_full_web.onnx" \
   --dst "$MODELS/htdemucs_6s_web.onnx"
 
-# 3. split into four equal parts.
-#    AMO rejects any single archive entry over its per-file limit, and the model is
-#    131 MB, so it ships as four ~32.7 MB files that the worker concatenates in memory
+# 4. split into four equal parts.
+#    AMO rejects any single archive entry over its per-file limit, so the model ships
+#    as four ~22 MB files that the worker concatenates in memory
 #    (see loadModelParts in extension/src/engine.worker.js).
-echo "[3/3] splitting into 4 parts"
+echo "[4/4] splitting into 4 parts"
 python3 - "$MODELS/htdemucs_6s_web.onnx" "$MODELS" <<'PY'
 import os, sys
 src, outdir = sys.argv[1], sys.argv[2]

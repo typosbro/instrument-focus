@@ -26,7 +26,7 @@ function makeWorker() {
   const chunks = new Map();
   const writeOrder = [];
   const ctx = {
-    console, performance, setTimeout, Math, Float32Array, Float64Array, Int16Array, Uint8Array, Array, Object, Error, Promise, String,
+    console, performance, setTimeout, clearTimeout, Math, Float32Array, Float64Array, Int16Array, Uint8Array, Uint32Array, Array, Object, Error, Promise, String,
     self: { postMessage: (m) => posted.push(m) },
     navigator: {},
   };
@@ -34,8 +34,10 @@ function makeWorker() {
   vm.runInContext(SRC, ctx);
   class Tensor { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }
   ctx.ort = { Tensor };
+  const spec = new Float32Array(STEMS * 2 * 2 * 2049 * 340);   // silent frequency branch
+  for (let i = 0; i < spec.length; i += 9973) spec[i] = 1e-3;  // ...almost: exercise the iSTFT path
   ctx.session = {
-    inputNames: ["mix"], outputNames: ["out"],
+    inputNames: ["mix"], outputNames: ["spec", "wave"],
     async run(feeds) {
       const x = feeds.mix.data;
       let mean = 0;
@@ -45,7 +47,7 @@ function makeWorker() {
       for (let s = 0; s < STEMS; s++) for (let i = 0; i < 2 * SEG; i++) {
         out[s * 2 * SEG + i] = 0.1 * x[i] * (1 + s) * (1 + 4 * mean) + 0.01 * Math.tanh(x[i] * 7 + s);
       }
-      return { out: { data: out } };
+      return { spec: { data: spec }, wave: { data: out } };
     },
   };
   ctx.engineInfo = { totalMs: 0, createMs: 0, warmMs: 0 };

@@ -21,12 +21,14 @@ Working, and honest about what is not done.
 | Batch pipeline: link in, page out | working |
 | Browser-side separation on WebGPU | measured, RTF 0.191 |
 | Browser extension, Chrome MV3, separation on your own GPU | working, measured |
+| Just-in-time: stems start ~5 s after the click, no preprocessing wait | working, measured |
 
 ## Try it
 
     git clone https://github.com/typosbro/instrument-focus
     cd instrument-focus
-    ./scripts/fetch_assets.sh          # 325 MB of model and runtime, once
+    pip install onnx                   # the model build needs it
+    ./scripts/fetch_assets.sh          # builds the 89 MB model, fetches the 84 MB runtime
 
 Then in Chrome: chrome://extensions, turn on Developer mode, Load unpacked, pick the extension
 folder. Open any YouTube video and click the pill in the bottom right.
@@ -62,11 +64,21 @@ Server-side batch pipeline, CPU only, for a 271-second song:
 
 ## The extension
 
-On a YouTube watch page it takes the audio, separates it into six stems on your own GPU, caches the
-result by video id, and then plays the stems in sync with the video. No server is involved and no
-audio leaves the machine.
+On a YouTube watch page it takes the audio, separates it into six stems on your own GPU, and plays
+them in sync with the video. Separation starts at the playhead and stays ahead of it, so the stems
+come in a few seconds after the click while the video keeps playing; anywhere not separated yet
+(right after a seek, say) plays the original audio until the stems catch up. The result is cached
+by video id. No server is involved and no audio leaves the machine.
 
-Measured on a 3:32 song:
+Measured on the same 3:32 song, M1 Pro, Chrome, WebGPU (2026-10-27, `extension/test/e2e_jit.py`):
+
+    click to stems audible   5.1 s   (video never paused)
+    whole song separated    42.6 s   (37 windows, 0.85 s GPU + 0.2 s iSTFT each, RTF 0.20)
+    cached replay            0.22 s
+    memory                  ~2.5 GB summed Chrome RSS
+    sync                     drift 9 ms
+
+Earlier measurement, before just-in-time and the iSTFT cut, RTX 4060 Laptop, Linux:
 
     click to ready   64.2 s   (37 windows of 7.8 s, 1.397 s per window, compute RTF 0.179)
     cached replay     0.29 s
@@ -84,12 +96,14 @@ fader is a bucket, not an instrument. A finer split needs a different model, not
 **Separation is a best guess.** Solo one instrument and it can sound hollow where the model dropped
 a transient. There is bleed between channels. It is very good and it is not a studio multitrack.
 
-**The model is not causal.** Its input is a fixed 7.8-second window, so 7.8 s is the latency floor no
-GPU can beat. This rules out live monitoring and DJ use. What it allows is: separate once, cache it,
-then every replay is instant.
+**The model is not causal.** Its input is a fixed 7.8-second window. For a song that is already
+loaded this does not matter: the extension separates ahead of the playhead faster than real time
+(RTF 0.20), so stems start about 5 s after the click. It does rule out live input (a microphone,
+DJ decks), where 7.8 s is a latency floor no GPU can beat. No causal model with public weights
+comes close to HTDemucs quality yet.
 
-**The browser path needs WebGPU.** The float32 model is 258 MB and exceeds the wasm32 heap, so a pure
-WASM fallback dies with std::bad_alloc. Apple Silicon, modern discrete GPUs and recent Linux drivers
+**The browser path needs WebGPU.** The original float32 model is 258 MB and exceeded the wasm32
+heap, so a pure WASM fallback died with std::bad_alloc. Apple Silicon, modern discrete GPUs and recent Linux drivers
 are fine. Old integrated graphics are not.
 
 **DRM sites cannot be captured.** YouTube, SoundCloud and Bandcamp expose their audio to the Web
@@ -123,6 +137,17 @@ It does not load in a browser as published. The stock export computes its invers
 and ONNX Runtime Web ships no float64 kernels, so it fails with a shape error that tells you nothing.
 `engine/webgpu/make_web_model.py` rewrites the doubles to float32; parity against the original is
 5.96e-08.
+
+Then `engine/webgpu/cut_istft.py` removes that inverse STFT from the graph entirely. It was about
+16,000 of the graph's 24,819 nodes, written as Slice/ScatterND chains that ONNX Runtime Web partly
+ran on its WASM fallback, so every window crossed GPU to CPU and back. The worker now does the same
+maths as a plain FFT in JS (`makeIstft` in `extension/src/engine.worker.js`). Measured on an M1 Pro,
+same input:
+
+    per window     2,904 ms  ->  774 ms GPU + 240 ms JS iSTFT
+    session start  3.0 s + 4.0 s warm-up  ->  1.0 s + 0.9 s
+    model file     131 MB  ->  89 MB
+    output         max |diff| 9.1e-05 against the full graph (peak 0.40)
 
 One warning that cost real time: **headless Chrome cannot use WebGPU.** `navigator.gpu` is undefined
 and Vulkan is disabled. It works headful under `xvfb-run` with

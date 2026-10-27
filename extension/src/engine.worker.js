@@ -24,6 +24,19 @@ let session = null;
 let enginePromise = null;
 let engineInfo = null;
 let cancelled = false;
+let deviceLost = null;
+const RUN_TIMEOUT_MS = 60000;  // one window is ~1-3 s; anything near this is a stalled GPU
+
+function runModel(feeds) {
+  if (deviceLost) return Promise.reject(new Error(deviceLost));
+  let timer;
+  const stall = new Promise(function (_, reject) {
+    timer = setTimeout(function () {
+      reject(new Error(deviceLost || "model run stalled for " + RUN_TIMEOUT_MS / 1000 + " s (GPU busy or lost)"));
+    }, RUN_TIMEOUT_MS);
+  });
+  return Promise.race([session.run(feeds), stall]).finally(function () { clearTimeout(timer); });
+}
 
 const post = (m, transfer) => self.postMessage(m, transfer || []);
 
@@ -109,7 +122,9 @@ async function loadModelParts(modelUrl) {
 }
 
 async function ensureEngine(vendorUrl, modelUrl) {
-  if (session) return engineInfo;
+  // engineInfo is set only after the warm-up run: returning on `session` alone let a
+  // separate() race the warm-up, and ORT-web hangs on concurrent runs of one session.
+  if (engineInfo) return engineInfo;
   if (enginePromise) return enginePromise;
   enginePromise = (async () => {
     const t0 = performance.now();
@@ -132,13 +147,24 @@ async function ensureEngine(vendorUrl, modelUrl) {
     const tCreate = performance.now();
     var modelBytes = await loadModelParts(modelUrl);
     session = await ort.InferenceSession.create(modelBytes, {
-      // wasm is paired only because ORT-web lacks WebGPU kernels for a handful
-      // of shape ops in /real_istft. This is not a whole-model WASM fallback.
+      // wasm stays paired for any shape op ORT-web has no WebGPU kernel for.
+      // The inverse STFT, which needed it most, now runs in JS (istftInto).
       executionProviders: ["webgpu", "wasm"],
       graphOptimizationLevel: "all",
     });
     const createMs = performance.now() - tCreate;
+    modelBytes = null;
+    if (session.outputNames.indexOf("spec") < 0 || session.outputNames.indexOf("wave") < 0) {
+      throw new Error("model outputs " + session.outputNames.join(",") + "; expected spec,wave (run scripts/build_model.sh)");
+    }
     post({ type: "engine-status", msg: "session created in " + Math.round(createMs) + " ms", createMs: createMs });
+    // A lost device leaves session.run() pending forever; say so instead of hanging.
+    Promise.resolve(ort.env.webgpu && ort.env.webgpu.device).then(function (dev) {
+      if (dev && dev.lost) dev.lost.then(function (info) {
+        deviceLost = "WebGPU device lost" + (info && info.message ? ": " + info.message : "");
+        post({ type: "error", stage: "gpu", message: deviceLost });
+      });
+    }).catch(function () {});
     const zeros = new Float32Array(2 * SEG);
     const tWarm = performance.now();
     await session.run({ mix: new ort.Tensor("float32", zeros, [1, 2, SEG]) });
@@ -159,6 +185,101 @@ async function ensureEngine(vendorUrl, modelUrl) {
     enginePromise = null;
     throw e;
   }
+}
+
+/* ---------------------------------------------------------- inverse STFT */
+/* The model graph stops at the padded spectrogram ("spec", [1,6,2,2,2049,340])
+   and the time branch ("wave", [1,6,2,SEG]). The stock export ran its inverse
+   STFT as ~16k Slice/ScatterND nodes, most of them on the WASM fallback, which
+   bounced every window between GPU and CPU. Here it is a plain real IFFT with
+   overlap-add, the same maths as HTDemucs _ispec: hann window, n_fft 4096,
+   hop 1024, normalized, centered, then cropped by 1536 samples. */
+const N_FFT = 4096, HOP = 1024, BINS = N_FFT / 2 + 1, HALF = N_FFT / 2;
+const SPEC_FRAMES = 340;
+const ISTFT_OFFSET = N_FFT / 2 + 1536;  // center trim + HTDemucs pad
+
+function makeIstft() {
+  const M = HALF;                        // real IFFT of N via complex FFT of N/2
+  const bits = Math.log2(M);
+  const rev = new Uint32Array(M);
+  for (let i = 0; i < M; i++) {
+    let r = 0;
+    for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b);
+    rev[i] = r;
+  }
+  // Contiguous twiddles per butterfly stage (sizes 8..M); sizes 2 and 4 are unrolled below.
+  const twRe = [], twIm = [];
+  for (let size = 8; size <= M; size <<= 1) {
+    const h = size >> 1, r = new Float64Array(h), i = new Float64Array(h);
+    for (let j = 0; j < h; j++) { r[j] = Math.cos(2 * Math.PI * j / size); i[j] = Math.sin(2 * Math.PI * j / size); }
+    twRe.push(r); twIm.push(i);
+  }
+  const postRe = new Float64Array(M), postIm = new Float64Array(M);
+  for (let k = 0; k < M; k++) { postRe[k] = Math.cos(2 * Math.PI * k / N_FFT); postIm[k] = Math.sin(2 * Math.PI * k / N_FFT); }
+  // sqrt(n_fft) undoes the normalized forward STFT; 1/M is the IFFT scale.
+  const win = new Float64Array(N_FFT);
+  for (let n = 0; n < N_FFT; n++) win[n] = (0.5 - 0.5 * Math.cos(2 * Math.PI * n / N_FFT)) * Math.sqrt(N_FFT) / M;
+  const outLen = N_FFT + HOP * (SPEC_FRAMES - 1);
+  const env = new Float64Array(outLen);
+  for (let t = 0; t < SPEC_FRAMES; t++) for (let n = 0; n < N_FFT; n++) {
+    const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / N_FFT);
+    env[t * HOP + n] += w * w;
+  }
+  const invEnv = new Float32Array(SEG);
+  for (let j = 0; j < SEG; j++) { const e = env[ISTFT_OFFSET + j]; invEnv[j] = e > 1e-11 ? 1 / e : 1; }
+  const re = new Float64Array(M), im = new Float64Array(M);
+  const y = new Float64Array(outLen);
+
+  // spec: Float32Array of [6,2,2,BINS,SPEC_FRAMES]. Adds the inverse of signal
+  // `sig` (= stem * 2 + channel) into out[outOff .. outOff + SEG).
+  return function istftInto(spec, sig, out, outOff) {
+    const reBase = (sig * 2) * BINS * SPEC_FRAMES;
+    const imBase = reBase + BINS * SPEC_FRAMES;
+    y.fill(0);
+    for (let t = 0; t < SPEC_FRAMES; t++) {
+      // Z[k] = (X[k] + conj X[M-k]) + i e^{+2pi i k/N} (X[k] - conj X[M-k]); DC/Nyquist imag dropped as irfft does.
+      for (let k = 0; k < M; k++) {
+        const xr = spec[reBase + k * SPEC_FRAMES + t];
+        const xi = k === 0 ? 0 : spec[imBase + k * SPEC_FRAMES + t];
+        const yr = spec[reBase + (M - k) * SPEC_FRAMES + t];
+        const yi = k === 0 ? 0 : -spec[imBase + (M - k) * SPEC_FRAMES + t];
+        const ar = xr + yr, ai = xi + yi;
+        const dr = xr - yr, di = xi - yi;
+        const pr = postRe[k], pi = postIm[k];
+        const br = dr * pr - di * pi, bi = dr * pi + di * pr;
+        const j = rev[k];
+        re[j] = 0.5 * (ar - bi);
+        im[j] = 0.5 * (ai + br);
+      }
+      // Inverse FFT (twiddles e^{+i...}), stages 2 and 4 as one radix-4 pass.
+      for (let i = 0; i < M; i += 4) {
+        const r0 = re[i], i0 = im[i], r1 = re[i + 1], i1 = im[i + 1];
+        const r2 = re[i + 2], i2 = im[i + 2], r3 = re[i + 3], i3 = im[i + 3];
+        const ar = r0 + r1, ai = i0 + i1, br = r0 - r1, bi = i0 - i1;
+        const cr = r2 + r3, ci = i2 + i3, dr = r2 - r3, di = i2 - i3;
+        re[i] = ar + cr; im[i] = ai + ci; re[i + 2] = ar - cr; im[i + 2] = ai - ci;
+        re[i + 1] = br - di; im[i + 1] = bi + dr; re[i + 3] = br + di; im[i + 3] = bi - dr;
+      }
+      for (let size = 8, st = 0; size <= M; size <<= 1, st++) {
+        const h = size >> 1, wr = twRe[st], wi = twIm[st];
+        for (let i = 0; i < M; i += size) {
+          for (let j = 0; j < h; j++) {
+            const a = i + j, b = a + h, c = wr[j], sn = wi[j];
+            const tr = re[b] * c - im[b] * sn;
+            const ti = re[b] * sn + im[b] * c;
+            re[b] = re[a] - tr; im[b] = im[a] - ti;
+            re[a] += tr; im[a] += ti;
+          }
+        }
+      }
+      const base = t * HOP;
+      for (let n = 0; n < M; n++) {
+        y[base + 2 * n] += re[n] * win[2 * n];
+        y[base + 2 * n + 1] += im[n] * win[2 * n + 1];
+      }
+    }
+    for (let j = 0; j < SEG; j++) out[outOff + j] += y[ISTFT_OFFSET + j] * invEnv[j];
+  };
 }
 
 function makeWindow() {
@@ -199,7 +320,8 @@ async function separate(job) {
   const deleteMs = performance.now() - tDelete;
 
   const inName = session.inputNames[0];
-  const outName = session.outputNames[0];
+  const istft = makeIstft();
+  const stemsBuf = new Float32Array(STEMS * 2 * SEG);
   const inData = new Float32Array(2 * SEG);
   const input = new ort.Tensor("float32", inData, [1, 2, SEG]);
   const windowW = makeWindow();
@@ -229,7 +351,7 @@ async function separate(job) {
 
   const nChunks = Math.max(1, Math.ceil(length / STRIDE));
   const chunkDone = new Uint8Array(nChunks);
-  let chunksDone = 0, warmups = 0;
+  let chunksDone = 0, warmups = 0, istftMs = 0;
   const chunkTimes = [];
   const totalAudioSec = length / SR;
   let lastProgressPost = 0;
@@ -262,9 +384,15 @@ async function separate(job) {
     inData.set(mixL.subarray(start, start + clen), 0);
     inData.set(mixR.subarray(start, start + clen), SEG);
     const tRun = performance.now();
-    const out = await session.run({ [inName]: input });
-    const data = out[outName].data;
+    const out = await runModel({ [inName]: input });
     chunkTimes.push(performance.now() - tRun);
+    // stems = time branch + inverse STFT of the frequency branch
+    const tIstft = performance.now();
+    const data = stemsBuf;
+    data.set(out.wave.data);
+    const spec = out.spec.data;
+    for (let sig = 0; sig < STEMS * 2; sig++) istft(spec, sig, data, sig * SEG);
+    istftMs += performance.now() - tIstft;
     for (let s = 0; s < STEMS; s++) {
       const a = acc[s];
       const base = s * 2 * SEG;
@@ -460,6 +588,7 @@ async function separate(job) {
       deleteMs: deleteMs,
       chunks: nChunks,
       warmups: warmups,
+      istftMs: Math.round(istftMs),
       chunkTimes: chunkTimes.map((x) => +x.toFixed(1)),
       audioSec: totalAudioSec,
       rtf: totalMs / 1000 / totalAudioSec,
